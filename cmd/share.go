@@ -149,13 +149,25 @@ var shareRevokeCmd = &cobra.Command{
 // --- upload path ---------------------------------------------------------
 
 func runUpload(session *model.Session, messages []model.Message, report redact.Report, mode redact.Mode) error {
-	cfg, err := loadShareConfig()
+	url, err := uploadShare(session, messages, report, mode, shareName, shareExpires)
 	if err != nil {
 		return err
 	}
-	lifetime, err := parseLifetime(shareExpires)
+	// URL on stdout so `ses share <id> | pbcopy` works.
+	fmt.Println(url)
+	return nil
+}
+
+// uploadShare uploads a redacted snapshot share and returns its URL. Used by
+// `ses share` and by the fleet worker to publish result sessions.
+func uploadShare(session *model.Session, messages []model.Message, report redact.Report, mode redact.Mode, name, expires string) (string, error) {
+	cfg, err := loadShareConfig()
 	if err != nil {
-		return err
+		return "", err
+	}
+	lifetime, err := parseLifetime(expires)
+	if err != nil {
+		return "", err
 	}
 
 	// Tell the user what they're about to upload unless suppressed.
@@ -163,7 +175,7 @@ func runUpload(session *model.Session, messages []model.Message, report redact.R
 		session.ShortID, len(messages), redactModeLabel(mode), report.Bytes, lifetime)
 
 	body := map[string]any{
-		"name":               shareName,
+		"name":               name,
 		"expires_in_seconds": int64(lifetime.Seconds()),
 		"session": shareserver.ShareSession{
 			ShortID:      session.ShortID,
@@ -181,11 +193,11 @@ func runUpload(session *model.Session, messages []model.Message, report redact.R
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return "", err
 	}
 	const maxBody = 10 << 20
 	if len(buf) > maxBody {
-		return fmt.Errorf("payload is %d bytes, exceeds 10 MB limit — try --redact=strict or share a smaller range", len(buf))
+		return "", fmt.Errorf("payload is %d bytes, exceeds 10 MB limit — try --redact=strict or share a smaller range", len(buf))
 	}
 	req, _ := http.NewRequest(http.MethodPost, cfg.URL+"/v1/shares", bytes.NewReader(buf))
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
@@ -193,12 +205,12 @@ func runUpload(session *model.Session, messages []model.Message, report redact.R
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("upload request: %w", err)
+		return "", fmt.Errorf("upload request: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("upload failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+		return "", fmt.Errorf("upload failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
 	}
 	var parsed struct {
 		ID        string    `json:"id"`
@@ -206,19 +218,17 @@ func runUpload(session *model.Session, messages []model.Message, report redact.R
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
+		return "", fmt.Errorf("decoding response: %w", err)
 	}
 	appendShareLog(shareLogEntry{
 		ID:           parsed.ID,
 		URL:          parsed.URL,
-		Name:         shareName,
+		Name:         name,
 		SessionShort: session.ShortID,
 		CreatedAt:    time.Now(),
 		ExpiresAt:    parsed.ExpiresAt,
 	})
-	// URL on stdout so `ses share <id> | pbcopy` works.
-	fmt.Println(parsed.URL)
-	return nil
+	return parsed.URL, nil
 }
 
 func toShareMessages(messages []model.Message) []shareserver.ShareMsg {
