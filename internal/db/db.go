@@ -38,6 +38,8 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) migrate() error {
-	_, err := db.conn.Exec(schemaSQL)
-	return err
+	if _, err := db.conn.Exec(schemaSQL); err != nil {
+		return err
+	}
+	return db.runMigrations()
 }

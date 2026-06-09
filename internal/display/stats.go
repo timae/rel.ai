@@ -97,6 +97,28 @@ func StatsDashboard(s *db.Stats) {
 		}
 	}
 
+	// Token usage
+	if s.Tokens.APICalls > 0 {
+		fmt.Println("╠" + line + "╣")
+		centerBox(w, "TOKENS", false)
+		fmt.Println("║" + strings.Repeat(" ", w) + "║")
+		fieldBox(w, "  Input", formatTokens(s.Tokens.InputTokens))
+		fieldBox(w, "  Output", formatTokens(s.Tokens.OutputTokens))
+		fieldBox(w, "  Cache write", formatTokens(s.Tokens.CacheCreationTokens))
+		fieldBox(w, "  Cache read", formatTokens(s.Tokens.CacheReadTokens))
+		cacheable := s.Tokens.CacheReadTokens + s.Tokens.CacheCreationTokens
+		if cacheable > 0 {
+			hitPct := s.Tokens.CacheReadTokens * 100 / cacheable
+			fieldBox(w, "  Cache hit rate", fmt.Sprintf("%d%%", hitPct))
+		}
+		for name, t := range s.TokensByModel {
+			if len(name) > 24 {
+				name = name[:24]
+			}
+			fieldBox(w, "  "+name, formatTokens(t.InputTokens+t.OutputTokens))
+		}
+	}
+
 	// Top tags
 	if len(s.TopTags) > 0 {
 		fmt.Println("╠" + line + "╣")
@@ -161,6 +183,18 @@ func padRightRunes(s string, w int) string {
 		return string(runes[:w])
 	}
 	return s + strings.Repeat(" ", w-runeCount)
+}
+
+func formatTokens(n int64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1e9)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func formatDuration(seconds float64) string {

@@ -33,6 +33,26 @@ type Session struct {
 	Tags            []string
 	Files           []SessionFile
 	UserPrompts     []string
+
+	// Token telemetry, aggregated from per-message usage in the transcript.
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	APICallCount        int
+	UsageDays           []UsageDay
+}
+
+// UsageDay is a per-day, per-model token rollup within one session. Long
+// sessions span days; weekly-capacity math needs per-day attribution.
+type UsageDay struct {
+	Day                 string // "2006-01-02", local time
+	Model               string
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	APICalls            int
 }
 
 type SessionFile struct {

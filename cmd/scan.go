@@ -30,10 +30,20 @@ var scanCmd = &cobra.Command{
 			return fmt.Errorf("no session sources found (checked %s, %s)", claudeHome, codexHome)
 		}
 
+		full := scanFull
+		backfill, _ := store.GetMeta("token_backfill")
+		if backfill == "pending" {
+			fmt.Println("Re-parsing all transcripts once to backfill token usage…")
+			full = true
+		}
+
 		orch := scanner.NewOrchestrator(store, scanners...)
-		newCount, updatedCount, err := orch.Scan(scanFull)
+		newCount, updatedCount, err := orch.Scan(full)
 		if err != nil {
 			return err
+		}
+		if backfill == "pending" {
+			store.SetMeta("token_backfill", "done")
 		}
 
 		fmt.Printf("Scan complete: %d new, %d updated\n", newCount, updatedCount)

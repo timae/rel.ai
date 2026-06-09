@@ -16,6 +16,10 @@ type Stats struct {
 	TopProjects    []CountEntry
 	TopTags        []CountEntry
 	DailyActivity  []DayCount
+
+	Tokens        TokenTotals
+	TokensByModel map[string]TokenTotals
+	TokensByDay   []DailyUsage // last 7 days
 }
 
 type CountEntry struct {
@@ -133,6 +137,40 @@ func (db *DB) GetStats(f ListFilter) (*Stats, error) {
 			s.TopTags = append(s.TopTags, e)
 		}
 	}
+
+	// Token totals (filter-aware via join to sessions)
+	db.conn.QueryRow(fmt.Sprintf(`
+		SELECT COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0),
+			COALESCE(SUM(u.cache_creation_tokens), 0), COALESCE(SUM(u.cache_read_tokens), 0),
+			COALESCE(SUM(u.api_calls), 0)
+		FROM session_usage_daily u JOIN sessions ON sessions.id = u.session_id %s`, where), args...).
+		Scan(&s.Tokens.InputTokens, &s.Tokens.OutputTokens,
+			&s.Tokens.CacheCreationTokens, &s.Tokens.CacheReadTokens, &s.Tokens.APICalls)
+
+	// Tokens by model
+	s.TokensByModel = make(map[string]TokenTotals)
+	rows, err = db.conn.Query(fmt.Sprintf(`
+		SELECT u.model, SUM(u.input_tokens), SUM(u.output_tokens),
+			SUM(u.cache_creation_tokens), SUM(u.cache_read_tokens), SUM(u.api_calls)
+		FROM session_usage_daily u JOIN sessions ON sessions.id = u.session_id %s
+		GROUP BY u.model ORDER BY SUM(u.input_tokens) + SUM(u.output_tokens) DESC`, where), args...)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			var t TokenTotals
+			rows.Scan(&name, &t.InputTokens, &t.OutputTokens,
+				&t.CacheCreationTokens, &t.CacheReadTokens, &t.APICalls)
+			if name == "" {
+				name = "(unknown)"
+			}
+			s.TokensByModel[name] = t
+		}
+	}
+
+	// Tokens per day (last 7 days)
+	weekStart := time.Now().AddDate(0, 0, -6).Format("2006-01-02")
+	s.TokensByDay, _ = db.UsageByDay(weekStart, "")
 
 	// Daily activity (last 7 days)
 	for i := 6; i >= 0; i-- {

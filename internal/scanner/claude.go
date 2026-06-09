@@ -56,9 +56,18 @@ type claudeTranscriptLine struct {
 }
 
 type claudeMessage struct {
+	ID      string            `json:"id"`
 	Role    string            `json:"role"`
 	Model   string            `json:"model"`
+	Usage   *claudeUsage      `json:"usage"`
 	Content json.RawMessage   `json:"content"`
+}
+
+type claudeUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
 }
 
 type claudeContentBlock struct {
@@ -177,6 +186,7 @@ func (s *ClaudeScanner) Parse(sf SessionFile) (*model.Session, []model.Message, 
 	var messages []model.Message
 	filesMap := make(map[string]string) // path -> action
 	toolUses := make(map[string]toolCallInfo) // tool_use.id -> info, for pairing with tool_result
+	usage := newUsageAccumulator()
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 2*1024*1024), 2*1024*1024)
@@ -245,6 +255,16 @@ func (s *ClaudeScanner) Parse(sf SessionFile) (*model.Session, []model.Message, 
 				session.Model = line.Message.Model
 			}
 
+			if line.Message.Usage != nil {
+				day := ""
+				if t, err := time.Parse(time.RFC3339Nano, line.Timestamp); err == nil {
+					day = t.Local().Format("2006-01-02")
+				} else if !session.StartedAt.IsZero() {
+					day = session.StartedAt.Local().Format("2006-01-02")
+				}
+				usage.Add(line.Message.ID, line.Message.Model, day, line.Message.Usage)
+			}
+
 			// Process tool calls
 			for _, tc := range toolCalls {
 				session.ToolCallCount++
@@ -281,6 +301,8 @@ func (s *ClaudeScanner) Parse(sf SessionFile) (*model.Session, []model.Message, 
 	if session.CWD == "" {
 		session.CWD = session.Project
 	}
+
+	usage.ApplyTo(session)
 
 	return session, messages, nil
 }

@@ -21,12 +21,14 @@ func (db *DB) InsertSession(s *model.Session, messages []model.Message) error {
 			short_id, source_type, source_id, pid, project, cwd,
 			git_branch, git_commit, started_at, ended_at,
 			message_count, tool_call_count, first_prompt, last_assistant,
-			model, transcript_path, scanned_at, transcript_mtime, transcript_size
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			model, transcript_path, scanned_at, transcript_mtime, transcript_size,
+			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, api_call_count
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.ShortID, s.SourceType, s.SourceID, s.PID, s.Project, s.CWD,
 		s.GitBranch, s.GitCommit, s.StartedAt, s.EndedAt,
 		s.MessageCount, s.ToolCallCount, s.FirstPrompt, s.LastAssistant,
 		s.Model, s.TranscriptPath, time.Now(), s.TranscriptMtime, s.TranscriptSize,
+		s.InputTokens, s.OutputTokens, s.CacheCreationTokens, s.CacheReadTokens, s.APICallCount,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting session: %w", err)
@@ -35,8 +37,16 @@ func (db *DB) InsertSession(s *model.Session, messages []model.Message) error {
 	sessionID, _ := res.LastInsertId()
 
 	// Delete old related data (for OR REPLACE case)
-	for _, table := range []string{"user_prompts", "session_files", "session_tags", "tool_outputs"} {
+	for _, table := range []string{"user_prompts", "session_files", "session_tags", "tool_outputs", "session_usage_daily"} {
 		tx.Exec("DELETE FROM "+table+" WHERE session_id = ?", sessionID)
+	}
+
+	// Insert per-day token usage rollups
+	for _, d := range s.UsageDays {
+		tx.Exec(`INSERT OR REPLACE INTO session_usage_daily
+			(session_id, day, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, api_calls)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			sessionID, d.Day, d.Model, d.InputTokens, d.OutputTokens, d.CacheCreationTokens, d.CacheReadTokens, d.APICalls)
 	}
 
 	// Insert user prompts
@@ -80,7 +90,8 @@ func (db *DB) GetBySourceID(sourceType model.Source, sourceID string) (*model.Se
 		SELECT id, short_id, source_type, source_id, pid, project, cwd,
 			git_branch, git_commit, started_at, ended_at,
 			message_count, tool_call_count, first_prompt, last_assistant,
-			model, transcript_path, scanned_at, transcript_mtime, transcript_size
+			model, transcript_path, scanned_at, transcript_mtime, transcript_size,
+			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, api_call_count
 		FROM sessions WHERE source_type = ? AND source_id = ?`,
 		sourceType, sourceID,
 	).Scan(
@@ -88,6 +99,7 @@ func (db *DB) GetBySourceID(sourceType model.Source, sourceID string) (*model.Se
 		&s.GitBranch, &s.GitCommit, &s.StartedAt, &s.EndedAt,
 		&s.MessageCount, &s.ToolCallCount, &s.FirstPrompt, &s.LastAssistant,
 		&s.Model, &s.TranscriptPath, &s.ScannedAt, &s.TranscriptMtime, &s.TranscriptSize,
+		&s.InputTokens, &s.OutputTokens, &s.CacheCreationTokens, &s.CacheReadTokens, &s.APICallCount,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -183,7 +195,8 @@ func (db *DB) GetSession(shortID string) (*model.Session, error) {
 		SELECT id, short_id, source_type, source_id, pid, project, cwd,
 			git_branch, git_commit, started_at, ended_at,
 			message_count, tool_call_count, first_prompt, last_assistant,
-			model, transcript_path
+			model, transcript_path,
+			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, api_call_count
 		FROM sessions WHERE short_id LIKE ?`,
 		shortID+"%",
 	).Scan(
@@ -191,6 +204,7 @@ func (db *DB) GetSession(shortID string) (*model.Session, error) {
 		&s.GitBranch, &s.GitCommit, &s.StartedAt, &s.EndedAt,
 		&s.MessageCount, &s.ToolCallCount, &s.FirstPrompt, &s.LastAssistant,
 		&s.Model, &s.TranscriptPath,
+		&s.InputTokens, &s.OutputTokens, &s.CacheCreationTokens, &s.CacheReadTokens, &s.APICallCount,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("no session matching %q", shortID)
