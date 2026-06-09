@@ -577,6 +577,117 @@ Pick up where the previous assistant left off.
 Review the files listed above for current state.
 ```
 
+### Fleet (Team Capacity Sharing)
+
+Enterprise seats come with per-person token quotas — and the quota of whoever
+is on vacation expires unused. Fleet turns that into shared capacity, without
+ever sharing accounts: **work moves to the tokens, tokens never move at all.**
+
+How it works:
+
+1. Every seat's `ses` reports its token usage (parsed from local transcripts)
+   to a self-hosted coordinator. `ses fleet board` shows who has headroom.
+2. Anyone can queue a background task: a prompt + repo + token budget,
+   optionally with full session context attached via the existing handoff
+   mechanism.
+3. Before going off, a teammate runs `ses away` — an opt-in worker on *their*
+   machine that claims matching tasks and runs Claude Code headlessly under
+   *their* account, pushes a result branch, and reports back with a redacted
+   result-session link.
+
+```bash
+# One-time enrollment (key from your fleet admin)
+ses fleet login --url https://fleet.internal.example --key sesf_…
+
+# Who has capacity right now?
+ses fleet board
+
+# Queue work for an idle seat, with context from your stuck session
+ses fleet enqueue --repo git@github.com:acme/widget \
+  --title "finish flaky-test fix" \
+  --prompt-file task.md \
+  --handoff a3f2b5c6 \
+  --max-tokens 500000 --max-turns 30
+
+# Track it
+ses fleet tasks --mine
+ses fleet task <id>          # detail + event log
+ses fleet cancel <id>        # remote cancel, honored mid-run
+
+# Before your vacation: define standing consent, then turn the worker on
+ses away config --allow-repo git@github.com:acme/ \
+  --max-tokens-per-day 2000000 \
+  --window "Sat 00:00-24:00" --window "Sun 00:00-24:00" --window "Mon-Fri 19:00-07:00"
+ses away on && ses away --install   # LaunchAgent; or run `ses away` in foreground
+
+# Back home: kill switch
+ses away off
+
+# Admin: monthly license right-sizing
+ses fleet report --since 2026-05-01
+```
+
+#### Guardrails (read this before enrolling your company)
+
+- **Compliance**: enterprise seats are per-person; pooling credentials
+  violates the license terms. The worker therefore runs *only* on the
+  seat-holder's own machine, under their own `~/.claude` login and their own
+  git credentials. Nothing is proxied, no keys leave the machine.
+- **Standing consent, narrowly scoped**: the worker claims nothing unless the
+  owner configured an explicit repo allowlist; it stays inside a daily
+  weighted-token cap and optional time windows, and every run uses
+  `--permission-mode acceptEdits` with a configurable `--allowedTools` set —
+  never `--dangerously-skip-permissions`.
+- **Three kill switches**: local (`ses away off` writes a STOP file), remote
+  per-task (`ses fleet cancel`, delivered at the next lease renewal), and
+  server-side per-seat (admin disables the API key).
+- **Dual audit**: the coordinator records every task event
+  (enqueued/claimed/done/failed, by whom, from which host); the worker keeps
+  its own append-only `~/.ses/worker/audit.jsonl` so the seat owner can
+  always see what ran under their account.
+- **Budget enforcement is live, not after-the-fact**: the worker parses
+  Claude Code's stream-json output and SIGTERMs the run the moment the
+  weighted-token or turn budget is crossed. Weighted tokens =
+  `input + output + cache_write + cache_read/10`.
+
+#### Running the fleet coordinator
+
+```bash
+# Local run
+FLEET_ADMIN_TOKEN=$(openssl rand -hex 24) \
+FLEET_DB=./data/fleet.db \
+go run ./cmd/fleet-server
+
+# Container image
+docker build -f cmd/fleet-server/Dockerfile -t ses-fleet-server .
+docker run -p 8081:8081 -v fleet-data:/data -e FLEET_ADMIN_TOKEN=… ses-fleet-server
+```
+
+Provisioning a seat (admin):
+
+```bash
+curl -X POST -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+  -d '{"email":"sam@example.com","weekly_budget_tokens":300000000}' \
+  https://fleet.internal.example/v1/admin/users
+# → returns the api_key exactly once; send it to Sam over a secure channel.
+# Sam runs: ses fleet login --url https://fleet.internal.example --key <key>
+
+# Rotate or disable later:
+curl -X PATCH -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+  -d '{"rotate_key":true}'  …/v1/admin/users/sam@example.com
+curl -X PATCH -H "Authorization: Bearer $FLEET_ADMIN_TOKEN" \
+  -d '{"disabled":true}'    …/v1/admin/users/sam@example.com
+```
+
+`weekly_budget_tokens` is the v1 capacity model: seat rate limits aren't
+exposed by the CLIs, so the admin sets an approximate weekly weighted-token
+budget per seat and the board shows `budget − rolling 7-day usage`. The
+heartbeat already carries raw per-day numbers, so a better budget source
+(OTel metrics, usage APIs) can replace the math without protocol changes.
+
+Deploy the coordinator on the same trust footing as the share server
+(internal network or TLS + VPN): task prompts may reference internal code.
+
 ## Storage
 
 - **Index**: SQLite database at `~/.ses/index.db` (configurable via `--db`)
@@ -596,6 +707,7 @@ ses/
     ses/main.go         # CLI entry point
     ses-menu/main.go    # Menu bar app entry point
     share-server/       # HTTP service hosting expiring share links (Dockerfile)
+    fleet-server/       # Team coordinator: capacity board + task queue (Dockerfile)
     scan.go             # Import sessions
     list.go             # Browse with filters
     show.go             # Session details
@@ -611,9 +723,14 @@ ses/
     handoff.go          # ses handoff (single-use claim link for mid-session handoff)
     resume_from.go      # ses resume --from <url> (claim a handoff)
     paste.go            # ses paste + ses pastes (recover big user pastes)
+    fleet.go            # ses fleet login/board/enqueue/tasks/cancel/report
+    away.go             # ses away — opt-in capacity worker + LaunchAgent
   internal/
-    db/                 # SQLite + FTS5 schema, queries, stats, links
-    scanner/            # Claude Code + Codex CLI parsers
+    db/                 # SQLite + FTS5 schema, queries, stats, links, token usage
+    scanner/            # Claude Code + Codex CLI parsers (incl. token telemetry)
+    fleet/              # Coordinator: store, HTTP API, capacity math
+    fleetclient/        # CLI-side client + usage heartbeats
+    worker/             # Worker: policy, poll loop, headless runner, audit
     model/              # Unified session data types
     resume/             # Context blob generator (full + brief for chains)
     redact/             # Pre-share transcript scrubbing (paths, secrets, creds)
