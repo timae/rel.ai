@@ -15,6 +15,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 	"github.com/timae/ses/internal/display"
+	"github.com/timae/ses/internal/fleet"
+	"github.com/timae/ses/internal/fleetclient"
 	"github.com/timae/ses/internal/scanner"
 )
 
@@ -91,8 +93,21 @@ func runWatcher() error {
 	claudeScanner := scanner.NewClaudeScanner(filepath.Join(home, ".claude"))
 	codexScanner := scanner.NewCodexScanner(filepath.Join(home, ".codex"))
 
+	// Best-effort fleet heartbeat so non-worker seats still show up on the
+	// capacity board. No-op unless `ses fleet login` has been run.
+	heartbeat := time.NewTicker(15 * time.Minute)
+	defer heartbeat.Stop()
+	sendHeartbeat := func() {
+		if err := fleetclient.MaybeHeartbeat(store, rootVersion(), fleet.WorkerStatus{State: "off"}); err != nil && !watchQuiet {
+			fmt.Fprintf(os.Stderr, "fleet heartbeat: %v\n", err)
+		}
+	}
+	sendHeartbeat()
+
 	for {
 		select {
+		case <-heartbeat.C:
+			sendHeartbeat()
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return nil
